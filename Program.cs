@@ -79,16 +79,16 @@ class MainForm : Form
         "поставила лайк", "liked", "подписался на", "подписалась на", "followed"
     };
 
-    readonly Button btnSelect = new() { Text = "1. Выделить область экрана", Width = 480, Height = 36 };
+    readonly Button btnSelect = new() { Text = "1. Выделить область экрана", Width = 380, Height = 36 };
     readonly Label lblRegion = new() { Text = "Область не выбрана", AutoSize = true };
-    readonly Button btnStart = new() { Text = "2. Старт", Width = 480, Height = 36, Enabled = false };
-    readonly ComboBox cmbVoice = new() { Width = 480, DropDownStyle = ComboBoxStyle.DropDownList };
-    readonly ComboBox cmbLang = new() { Width = 480, DropDownStyle = ComboBoxStyle.DropDownList };
-    readonly TrackBar trkRate = new() { Width = 480, Minimum = -5, Maximum = 8, Value = 1 };
+    readonly Button btnStart = new() { Text = "2. Старт", Width = 380, Height = 36, Enabled = false };
+    readonly ComboBox cmbVoice = new() { Width = 380, DropDownStyle = ComboBoxStyle.DropDownList };
+    readonly ComboBox cmbLang = new() { Width = 380, DropDownStyle = ComboBoxStyle.DropDownList };
+    readonly TrackBar trkRate = new() { Width = 380, Minimum = -5, Maximum = 8, Value = 1 };
     readonly CheckBox chkInvert = new() { Text = "Светлый текст на тёмном фоне (инвертировать)", AutoSize = true };
-    readonly PictureBox pic = new() { Width = 480, Height = 150, SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle };
-    readonly TextBox txtSkip = new() { Width = 480, Height = 110, Multiline = true, ScrollBars = ScrollBars.Vertical };
-    readonly TextBox txtLog = new() { Width = 480, Height = 150, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+    readonly PictureBox pic = new() { Width = 450, Height = 110, SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle };
+    readonly TextBox txtSkip = new() { Width = 450, Height = 110, Multiline = true, ScrollBars = ScrollBars.Vertical };
+    readonly TextBox txtLog = new() { Width = 450, Height = 130, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
     readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     readonly SpeechSynthesizer synth = new();
     readonly List<VoiceInfo> voices = new();
@@ -106,26 +106,40 @@ class MainForm : Form
     public MainForm()
     {
         Text = "Читалка области экрана";
-        ClientSize = new Size(510, 830);
+        ClientSize = new Size(880, 480);
         TopMost = true;
 
-        var flow = new FlowLayoutPanel
+        var left = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
             WrapContents = false, AutoScroll = true, Padding = new Padding(10)
         };
-        flow.Controls.AddRange(new Control[]
+        left.Controls.AddRange(new Control[]
         {
             btnSelect, lblRegion, btnStart,
             new Label { Text = "Голос:", AutoSize = true }, cmbVoice,
             new Label { Text = "Язык распознавания текста:", AutoSize = true }, cmbLang,
             new Label { Text = "Скорость речи:", AutoSize = true }, trkRate,
-            chkInvert,
+            chkInvert
+        });
+        var right = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+            WrapContents = false, AutoScroll = true, Padding = new Padding(10)
+        };
+        right.Controls.AddRange(new Control[]
+        {
             new Label { Text = "Что видит программа:", AutoSize = true }, pic,
             new Label { Text = "Не читать строки со словами (по одному на строку):", AutoSize = true }, txtSkip,
             new Label { Text = "Что прочитано:", AutoSize = true }, txtLog
         });
-        Controls.Add(flow);
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 410));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        table.Controls.Add(left, 0, 0);
+        table.Controls.Add(right, 1, 0);
+        Controls.Add(table);
 
         foreach (var v in synth.GetInstalledVoices().Where(v => v.Enabled).Select(v => v.VoiceInfo))
         {
