@@ -1,9 +1,11 @@
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Speech.Synthesis;
 using System.Windows.Forms;
 using Windows.Graphics.Imaging;
+using Windows.Media.Core;
 using Windows.Media.Ocr;
+using Windows.Media.Playback;
+using Windows.Media.SpeechSynthesis;
 using Windows.Storage.Streams;
 
 namespace ScreenReader;
@@ -93,7 +95,9 @@ class MainForm : Form
     readonly TextBox txtLog = new() { Width = 450, Height = 130, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
     readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     readonly SpeechSynthesizer synth = new();
-    readonly List<VoiceInfo> voices = new();
+    readonly MediaPlayer player = new();
+    readonly Queue<string> queue = new();
+    readonly List<VoiceInformation> voices = new();
     readonly List<Windows.Globalization.Language> langs = new();
     readonly List<(string text, DateTime t)> spoken = new();
     readonly string skipFile = Path.Combine(
@@ -102,7 +106,8 @@ class MainForm : Form
     OcrEngine? engine;
     Rectangle region;
     bool running, busy, primed;
-    int pending;
+    bool speaking;
+    TaskCompletionSource? current;
     List<string> prev = new();
 
     public MainForm()
@@ -143,12 +148,12 @@ class MainForm : Form
         table.Controls.Add(right, 1, 0);
         Controls.Add(table);
 
-        foreach (var v in synth.GetInstalledVoices().Where(v => v.Enabled).Select(v => v.VoiceInfo))
+        foreach (var v in SpeechSynthesizer.AllVoices)
         {
             voices.Add(v);
-            cmbVoice.Items.Add($"{v.Name} ({v.Culture.Name})");
+            cmbVoice.Items.Add($"{v.DisplayName} ({v.Language})");
         }
-        int vi = voices.FindIndex(v => v.Culture.TwoLetterISOLanguageName == "ru");
+        int vi = voices.FindIndex(v => v.Language.StartsWith("ru"));
         if (voices.Count > 0) cmbVoice.SelectedIndex = vi >= 0 ? vi : 0;
 
         foreach (var l in OcrEngine.AvailableRecognizerLanguages)
@@ -172,20 +177,21 @@ class MainForm : Form
             catch { }
         };
 
-        synth.Rate = trkRate.Value;
-        trkRate.ValueChanged += (s, e) => synth.Rate = trkRate.Value;
+        ApplyRate();
+        trkRate.ValueChanged += (s, e) => ApplyRate();
         cmbVoice.SelectedIndexChanged += (s, e) => ApplyVoice();
         cmbLang.SelectedIndexChanged += (s, e) => engine = null;
         ApplyVoice();
-        synth.SpeakCompleted += (s, e) => pending = Math.Max(0, pending - 1);
 
         btnSelect.Click += async (s, e) => await SelectRegion();
         btnStart.Click += (s, e) => Toggle();
         timer.Tick += async (s, e) => await Cycle();
-        FormClosing += (s, e) => { timer.Stop(); synth.SpeakAsyncCancelAll(); };
+        FormClosing += (s, e) => { timer.Stop(); StopSpeech(); };
 
         Shown += (s, e) =>
         {
+            if (!voices.Any(v => v.Language.StartsWith("ru")))
+                MessageBox.Show("Не найден русский голос.\n\nУстанови его: Параметры Windows → Время и язык → Речь → Управление голосами → Добавить голоса → Русский. Затем перезапусти программу.", "Читалка");
             if (langs.Count == 0)
                 MessageBox.Show("Не найдено языков распознавания текста.\n\nУстанови язык: Параметры Windows → Время и язык → Язык и регион → Добавить язык → Русский (с галочкой «Оптическое распознавание текста»), затем перезапусти программу.", "Читалка");
         };
@@ -193,8 +199,55 @@ class MainForm : Form
 
     void ApplyVoice()
     {
-        try { if (cmbVoice.SelectedIndex >= 0) synth.SelectVoice(voices[cmbVoice.SelectedIndex].Name); }
+        try { if (cmbVoice.SelectedIndex >= 0) synth.Voice = voices[cmbVoice.SelectedIndex]; }
         catch { }
+    }
+
+    void ApplyRate()
+    {
+        try { synth.Options.SpeakingRate = 1.0 + trkRate.Value * 0.1; }
+        catch { }
+    }
+
+    void Enqueue(string text)
+    {
+        if (queue.Count > 6) queue.Clear(); // не копим очередь
+        queue.Enqueue(text);
+        if (!speaking) _ = SpeakLoop();
+    }
+
+    async Task SpeakLoop()
+    {
+        speaking = true;
+        try
+        {
+            while (queue.Count > 0)
+            {
+                var text = queue.Dequeue();
+                using var stream = await synth.SynthesizeTextToStreamAsync(text);
+                var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                current = done;
+                Windows.Foundation.TypedEventHandler<MediaPlayer, object> ended = (p, a) => done.TrySetResult();
+                Windows.Foundation.TypedEventHandler<MediaPlayer, MediaPlayerFailedEventArgs> failed = (p, a) => done.TrySetResult();
+                player.MediaEnded += ended;
+                player.MediaFailed += failed;
+                player.Source = MediaSource.CreateFromStream(stream, stream.ContentType);
+                player.Play();
+                await Task.WhenAny(done.Task, Task.Delay(30000));
+                player.MediaEnded -= ended;
+                player.MediaFailed -= failed;
+                player.Source = null;
+            }
+        }
+        catch (Exception ex) { Log("Ошибка голоса: " + ex.Message); }
+        finally { speaking = false; }
+    }
+
+    void StopSpeech()
+    {
+        queue.Clear();
+        try { player.Pause(); } catch { }
+        current?.TrySetResult();
     }
 
     async Task SelectRegion()
@@ -221,15 +274,14 @@ class MainForm : Form
         running = !running;
         if (running)
         {
-            primed = false; prev = new(); pending = 0;
+            primed = false; prev = new();
             timer.Start();
             btnStart.Text = "Стоп";
         }
         else
         {
             timer.Stop();
-            synth.SpeakAsyncCancelAll();
-            pending = 0;
+            StopSpeech();
             btnStart.Text = "2. Старт";
         }
     }
@@ -335,9 +387,7 @@ class MainForm : Form
     {
         var line = chkTranslate.Checked ? await Translate(text) : text;
         Log(line != text ? text + "  ->  " + line : line);
-        if (pending > 6) { synth.SpeakAsyncCancelAll(); pending = 0; }
-        pending++;
-        synth.SpeakAsync(line);
+        Enqueue(line);
     }
 
     // Бесплатный неофициальный перевод Google. Если интернета нет - читает как есть.
