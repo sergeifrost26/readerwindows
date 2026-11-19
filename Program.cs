@@ -86,6 +86,8 @@ class MainForm : Form
     readonly ComboBox cmbLang = new() { Width = 380, DropDownStyle = ComboBoxStyle.DropDownList };
     readonly TrackBar trkRate = new() { Width = 380, Minimum = -5, Maximum = 8, Value = 1 };
     readonly CheckBox chkInvert = new() { Text = "Светлый текст на тёмном фоне (инвертировать)", AutoSize = true };
+    readonly CheckBox chkTranslate = new() { Text = "Переводить на русский перед чтением", AutoSize = true };
+    static readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(5) };
     readonly PictureBox pic = new() { Width = 450, Height = 110, SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle };
     readonly TextBox txtSkip = new() { Width = 450, Height = 110, Multiline = true, ScrollBars = ScrollBars.Vertical };
     readonly TextBox txtLog = new() { Width = 450, Height = 130, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
@@ -120,7 +122,7 @@ class MainForm : Form
             new Label { Text = "Голос:", AutoSize = true }, cmbVoice,
             new Label { Text = "Язык распознавания текста:", AutoSize = true }, cmbLang,
             new Label { Text = "Скорость речи:", AutoSize = true }, trkRate,
-            chkInvert
+            chkInvert, chkTranslate
         });
         var right = new FlowLayoutPanel
         {
@@ -296,13 +298,13 @@ class MainForm : Form
             using var sb = await dec.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
             var res = await engine.RecognizeAsync(sb);
             var lines = res.Lines.Select(l => l.Text.Trim()).Where(t => t.Length > 1).ToList();
-            HandleLines(lines);
+            await HandleLines(lines);
         }
         catch (Exception ex) { Log("Ошибка: " + ex.Message); }
         finally { busy = false; }
     }
 
-    void HandleLines(List<string> lines)
+    async Task HandleLines(List<string> lines)
     {
         var skip = txtSkip.Lines.Select(x => x.Trim().ToLowerInvariant()).Where(x => x.Length > 0).ToList();
         var cur = lines.Where(l => { var low = l.ToLowerInvariant(); return !skip.Any(s => low.Contains(s)); }).ToList();
@@ -324,17 +326,35 @@ class MainForm : Form
         {
             if (spoken.Any(x => Similar(x.text, l) >= 0.85)) continue; // защита от ошибок распознавания
             spoken.Add((l, DateTime.Now));
-            Say(l);
+            await Say(l);
         }
         prev = cur;
     }
 
-    void Say(string text)
+    async Task Say(string text)
     {
-        Log(text);
+        var line = chkTranslate.Checked ? await Translate(text) : text;
+        Log(line != text ? text + "  ->  " + line : line);
         if (pending > 6) { synth.SpeakAsyncCancelAll(); pending = 0; }
         pending++;
-        synth.SpeakAsync(text);
+        synth.SpeakAsync(line);
+    }
+
+    // Бесплатный неофициальный перевод Google. Если интернета нет - читает как есть.
+    static async Task<string> Translate(string text)
+    {
+        try
+        {
+            var url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ru&dt=t&q=" + Uri.EscapeDataString(text);
+            var json = await http.GetStringAsync(url);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var sb = new System.Text.StringBuilder();
+            foreach (var part in doc.RootElement[0].EnumerateArray())
+                sb.Append(part[0].GetString());
+            var r = sb.ToString().Trim();
+            return r.Length > 0 ? r : text;
+        }
+        catch { return text; }
     }
 
     void Log(string line)
