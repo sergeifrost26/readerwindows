@@ -151,8 +151,22 @@ class MainForm : Form
 
         // Голоса Piper (качественные, офлайн): папка piper и voices рядом с программой
         var exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
-        piperExe = Path.Combine(exeDir, "piper", "piper.exe");
+        var pDir = Path.Combine(exeDir, "piper");
         var voicesDir = Path.Combine(exeDir, "voices");
+        // Piper не умеет работать с русскими буквами в пути: если они есть, копируем в C:\ProgramData
+        if (Directory.Exists(pDir) && Directory.Exists(voicesDir) && (!IsAscii(pDir) || !IsAscii(voicesDir)))
+        {
+            try
+            {
+                var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ScreenReaderPiper");
+                CopyDir(pDir, Path.Combine(root, "piper"));
+                CopyDir(voicesDir, Path.Combine(root, "voices"));
+                pDir = Path.Combine(root, "piper");
+                voicesDir = Path.Combine(root, "voices");
+            }
+            catch { }
+        }
+        piperExe = Path.Combine(pDir, "piper.exe");
         if (File.Exists(piperExe) && Directory.Exists(voicesDir))
         {
             foreach (var m in Directory.GetFiles(voicesDir, "*.onnx").OrderBy(x => x))
@@ -207,6 +221,20 @@ class MainForm : Form
         };
     }
 
+    static bool IsAscii(string s) => s.All(c => c < 128);
+
+    static void CopyDir(string src, string dst)
+    {
+        Directory.CreateDirectory(dst);
+        foreach (var f in Directory.GetFiles(src))
+        {
+            var t = Path.Combine(dst, Path.GetFileName(f));
+            if (!File.Exists(t) || new FileInfo(t).Length != new FileInfo(f).Length) File.Copy(f, t, true);
+        }
+        foreach (var d in Directory.GetDirectories(src))
+            CopyDir(d, Path.Combine(dst, Path.GetFileName(d)));
+    }
+
     void ApplyVoice()
     {
         try
@@ -246,7 +274,7 @@ class MainForm : Form
                         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                         current = done;
                         Windows.Foundation.TypedEventHandler<MediaPlayer, object> ended = (p, a) => done.TrySetResult();
-                        Windows.Foundation.TypedEventHandler<MediaPlayer, MediaPlayerFailedEventArgs> failed = (p, a) => done.TrySetResult();
+                        Windows.Foundation.TypedEventHandler<MediaPlayer, MediaPlayerFailedEventArgs> failed = (p, a) => { BeginInvoke(() => Log("Ошибка воспроизведения: " + a.ErrorMessage)); done.TrySetResult(); };
                         player.MediaEnded += ended;
                         player.MediaFailed += failed;
                         player.Source = MediaSource.CreateFromStream(stream, ctype);
@@ -286,7 +314,11 @@ class MainForm : Form
 
     async Task<byte[]> RunPiper(string model, string text)
     {
-        var tmp = Path.Combine(Path.GetTempPath(), "sr_" + Guid.NewGuid().ToString("N") + ".wav");
+        var tmpDir = Path.GetTempPath();
+        if (!IsAscii(tmpDir))
+            tmpDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ScreenReaderPiper");
+        Directory.CreateDirectory(tmpDir);
+        var tmp = Path.Combine(tmpDir, "sr_" + Guid.NewGuid().ToString("N") + ".wav");
         var scale = (1.0 / (1.0 + trkRate.Value * 0.1)).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         var psi = new System.Diagnostics.ProcessStartInfo
         {
@@ -294,15 +326,29 @@ class MainForm : Form
             Arguments = $"--model \"{model}\" --output_file \"{tmp}\" --length_scale {scale}",
             WorkingDirectory = Path.GetDirectoryName(piperExe)!,
             RedirectStandardInput = true,
+            RedirectStandardError = true,
             StandardInputEncoding = new System.Text.UTF8Encoding(false),
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             UseShellExecute = false,
             CreateNoWindow = true
         };
         using var p = System.Diagnostics.Process.Start(psi)!;
+        var errTask = p.StandardError.ReadToEndAsync();
         await p.StandardInput.WriteLineAsync(text.Replace("\r", " ").Replace("\n", " "));
         p.StandardInput.Close();
         using var cts = new CancellationTokenSource(20000);
-        await p.WaitForExitAsync(cts.Token);
+        try { await p.WaitForExitAsync(cts.Token); }
+        catch (OperationCanceledException)
+        {
+            try { p.Kill(); } catch { }
+            throw new Exception("Piper не ответил за 20 секунд");
+        }
+        if (!File.Exists(tmp) || new FileInfo(tmp).Length < 100)
+        {
+            var err = await errTask;
+            if (err.Length > 300) err = err[^300..];
+            throw new Exception($"Piper не создал звук (код {p.ExitCode}). {err}");
+        }
         var bytes = await File.ReadAllBytesAsync(tmp);
         try { File.Delete(tmp); } catch { }
         return bytes;
